@@ -1,94 +1,109 @@
-# GRPO:Zero
+# GRPO-Zero: Fact-Checking with DeepSeek-VL2
 
-GRPO training with minimal dependencies (and low GPU memory usage!). We implement almost everything from scratch and only depend on `tokenizers` for tokenization and `pytorch` for training. 
-- No `transformers` and `vLLM` dependencies! 
-- The default config is set to run on a single A40 GPU (48GB VRAM) for a few hours to get good results. (An A40 costs `$0.44` per hour if you rent it from RunPod.)
-- We also support training with a 24GB VRAM GPU (e.g., an RTX 4090 GPU) by offloading the optimizer to CPU. Fortunately, this only adds a small overhead to the training because we only update the policy network a few hundred times during the entire training process.
-- We support several improvements over the original GRPO algorithm from the [DAPO project](https://arxiv.org/abs/2503.14476), including:
-    - **Token-level policy gradient loss**: every token is equally weighted in the policy gradient loss.
-    - **Removing KL Divergence**: the KL divergence is not used in the policy gradient loss. This reduces GPU memory usage as we no longer need the reference policy network.
-    - **Overlong episode filtering**: skips unfinished episodes that exceed context length limits. This stabilizes training. Though we disabled it by default to observe model learning under limited context length. Set `skip_unfinished_episodes` to `true` to enable it.
+GRPO training with minimal dependencies for fact-checking tasks using vision-language models. This implementation supports both binary (TRUE/FALSE) and multiclass (TRUE/out-of-context/miscaptioned) classification for news verification using DeepSeek-VL2.
 
-## Algorithm 
+## Quick Start
 
-Group Relative Policy Optimization (GRPO) is an algorithm proposed by Deepseek for training large language models with reinforcement learning. The idea is simple: for each question, we randomly sample multiple answers. The advantage of an answer is then defined as the normalized reward. This gets rid of the value estimation network. In particular, we implement the following algorithm:
-
-1. For each training step, randomly sample $N$ questions $q_1, q_2, \cdots, q_N$.
-2. For each question $q_i$, sample $M$ answers $a_{i,1}, a_{i,2}, \cdots, a_{i,M}$.
-3. Compute the reward $r_{i,j}$ for each answer $a_{i,j}$.
-4. Compute the mean and std of the rewards for each question $q_i$.
-
-$$
-\begin{aligned}
-\mu_i &\leftarrow \text{mean}(r_{i,1}, r_{i,2}, \cdots, r_{i,M}) \\
-\sigma_i &\leftarrow \text{std}(r_{i,1}, r_{i,2}, \cdots, r_{i,M})
-\end{aligned}
-$$
-
-5. For each token $t$ in the answer $a_{i,j}$, compute the advantage as
-
-$$A_{i,j}[t] \leftarrow \frac{r_{i,j} - \mu_i}{\sigma_i}$$
-
-6. Compute policy gradient using PPO surrogate objective. For simplicity, we will only do one policy update per iteration, in which the gradient of the PPO objective is equivalent to following vanilla policy gradient estimation (per token).
-
-$$
-\nabla_\theta \log \pi_\theta(a_{i,j}[t]) \cdot A_{i,j}[t]
-$$
-
-7. Update the policy network $\pi(\theta)$ using the gradient. Go back to step 1.
-
-## CountDown Task
-
-We are going to train the Qwen2.5 models on the [CountDown task](https://huggingface.co/datasets/Jiayi-Pan/Countdown-Tasks-3to4). Given a list of 3 or 4 numbers and a target number, the model needs to generate a mathematical expression using simple arithmetic operations (+, -, *, /) that evaluates to the target number. For example:
-
-```
-Question: Given 1 2 3 4 and a target number 11. Show an expression that evaluates to 11.
-Answer: 1 + (2 * 3) + 4
-```
-
-## Reward Function
-
-To solve the CountDown task, we will use the GRPO algorithm to train the model to generate the chain of thought reasoning before generating the final expression. Specifically, the model is trained to follow the format:
-
-```
-<think>Model step by step reasoning</think>
-<answer>Final answer</answer>
-```
-
-The reward is the sum of two components:
-
-1. **Format Reward**: The model earns a reward of `0.1` when it correctly follows the specified format with thinking and answer tags, and `0` otherwise.
-2. **Answer Reward**: The model receives a reward of `1` if its final answer uses each provided number exactly once and correctly evaluates to the target value, otherwise it receives `0`.
-
-
-## Training
-
-We use the `Qwen2.5-3B-Instruct` model for training. To train the model, run the following commands:
+For the easiest setup and training experience, use the provided setup script:
 
 ```bash
-# initialize the environment
-pip install uv
-uv sync
-
-# install git-lfs
-apt update; apt install git-lfs -y; git lfs install
-
-# download the dataset
-git clone https://huggingface.co/datasets/Jiayi-Pan/Countdown-Tasks-3to4
-
-# download the pretrained model
-git clone https://huggingface.co/Qwen/Qwen2.5-3B-Instruct
-# train the model
-uv run train.py
-# train the model with a 24GB VRAM GPU (e.g., an RTX 4090 GPU)
-uv run train.py --config config_24GB.yaml
+# Setup environment and run training in one command
+./setup_and_run.sh && ./run_train.sh --config config_24GB.yaml
 ```
-## Acknowledgements
 
-This project builds upon the work of several outstanding projects:
+This script will:
+- Initialize conda environment
+- Install all dependencies including PyTorch and DeepSeek-VL2
+- Create necessary directories
+- Prepare the environment for training
 
-- [DeepSeekMath](https://arxiv.org/abs/2402.03300) for pioneering the GRPO algorithm.
-- [DAPO](https://arxiv.org/abs/2503.14476) for their enhancements to the original GRPO algorithm.
-- [TinyZero](https://github.com/Jiayi-Pan/TinyZero) for their implementation of GRPO and creation of the [CountDown-Tasks-3to4](https://huggingface.co/datasets/Jiayi-Pan/Countdown-Tasks-3to4) dataset.
-- [nano-aha-moment](https://github.com/McGill-NLP/nano-aha-moment/tree/main) for their clear implementation and tutorial on the GRPO algorithm.
-- [Qwen2.5](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) for developing the high-quality pretrained model used in this project.
+## Data Requirements
+
+For custom fact-checking tasks, you need to prepare your data directories:
+
+```
+GRPO-Zero/
+├── filtered/          # Evidence data repositories
+│   ├── [data_repo_1]/ # Your evidence data repositories go here
+│   └── [data_repo_2]/
+├── images/            # Query and evidence images
+│   ├── query_*.jpg    # Query images for fact-checking
+│   └── evidence_*.jpg # Evidence images for verification
+└── ...
+```
+
+**Important**: Make sure to place your data repositories under the `filtered/` directory and all images (both query and evidence) under the `images/` directory before starting training.
+
+## Switching to Multiclass Classification
+
+The current implementation uses binary classification (TRUE/FALSE). To switch to multiclass classification with three categories ("TRUE", "out-of-context", "miscaptioned"), you need to modify `customdata_task.py`:
+
+### 1. Update USER_TEMPLATE
+
+Change the classification instructions in the `USER_TEMPLATE`:
+
+```python
+USER_TEMPLATE = (
+    "You are a fact-checking assistant. Your task is to verify the authenticity of news using a reasoning-first approach. "
+    "First, think through the evidence and rationale, then provide a clear final verdict."
+    "A news story is presented as a query consisting of an image <image>\n and a caption <|ref|>({query_caption})<|/ref|>. "
+    "Your task is to determine whether this news is 'TRUE', 'out-of-context', or 'miscaptioned'. "
+    "You are provided with supporting evidence, including a set of images ({evidence_images}) and related text descriptions ({evidence_text}).\n\n"
+
+    "Use all available evidence to assess whether the query image and caption align with the facts. "
+    "Check for visual inconsistencies, mismatches in dates or events, and contradictions between the query and the evidence. "
+    "- 'TRUE': The image and caption are factually accurate and properly matched\n"
+    "- 'out-of-context': The image is real but used in wrong context or timeframe\n" 
+    "- 'miscaptioned': The image is real but the caption is incorrect or misleading\n\n"
+    "Your reasoning process must be written inside <think> </think> tags. Show how the visual and textual elements support or refute the claim.\n\n"
+
+    "Finally, provide your verdict in <answer> </answer> tags.\n"
+    "Example: <answer> out-of-context </answer>"
+)
+```
+
+### 2. Update Answer Reward Function
+
+Modify the `answer_reward_function` to handle three classes:
+
+```python
+def answer_reward_function(response: str, target: str = None) -> float:
+    """
+    Evaluates if the model's fact-checking verdict matches the target label.
+    
+    Args:
+        response: Model's response containing <answer>CLASS</answer>
+        target: Ground truth label ('TRUE', 'miscaptioned', or 'out-of-context')
+    
+    Returns:
+        1.0 if verdict matches target exactly
+        0.0 if no match or invalid format
+    """
+    answer_regex = r"<answer>\s*(TRUE|out-of-context|miscaptioned)\s*<\/answer>"
+    answer_match = re.search(answer_regex, response, re.DOTALL)
+    if not answer_match:
+        return 0.0
+
+    answer_content = answer_match.group(1).strip()
+    if not answer_content:
+        return 0.0
+
+    # Direct exact match for multiclass
+    if answer_content == target:
+        return 1.0
+    
+    return 0.0
+```
+
+### 3. Update Format Reward Function (Optional)
+
+You may also want to update the regex in `format_reward_function` to reflect the new answer format:
+
+```python
+def format_reward_function(response: str, end_token: Optional[str] = None) -> float:
+    # Update the full format regex to include multiclass options
+    full_format_regex = r"^<think>.*?<\/think>\n<answer>\s*(TRUE|out-of-context|miscaptioned)\s*<\/answer>$"
+    # ... rest of the function remains the same
+```
+
+These changes will enable proper multiclass classification with appropriate reward calculation for each of the three categories.
